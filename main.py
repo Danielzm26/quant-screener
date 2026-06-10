@@ -18,12 +18,11 @@ stocks = ["MU","MSFT","CIEN","VST","NVDA","TSLA","PLTR","AMD","AMZN","AAPL","NFL
 # =========================
 @st.cache_data(ttl=3600)
 def download_all(stocks):
-    return yf.download(stocks, period="1y", group_by="ticker", progress=False)
+    return yf.download(stocks, period="5y", group_by="ticker", progress=False)
 
 # =========================
 # MARKET REGIME
 # =========================
-@st.cache_data(ttl=3600)
 def market_condition():
     spy = yf.download("SPY", period="1y", progress=False)
 
@@ -33,17 +32,17 @@ def market_condition():
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = spy.columns.get_level_values(0)
 
-    spy['SMA50'] = spy['Close'].rolling(50).mean()
-    spy['SMA200'] = spy['Close'].rolling(200).mean()
+    spy["SMA50"] = spy["Close"].rolling(50).mean()
+    spy["SMA200"] = spy["Close"].rolling(200).mean()
 
     last = spy.iloc[-1]
 
-    high_50 = spy['Close'].rolling(50).max().iloc[-1]
-    low_50 = spy['Close'].rolling(50).min().iloc[-1]
+    high_50 = spy["Close"].rolling(50).max().iloc[-1]
+    low_50 = spy["Close"].rolling(50).min().iloc[-1]
 
-    if last['SMA50'] > last['SMA200']:
+    if last["SMA50"] > last["SMA200"]:
         return "BULL", None
-    elif last['SMA50'] < last['SMA200']:
+    elif last["SMA50"] < last["SMA200"]:
         return "BEAR", None
 
     return "SIDEWAYS", {"high": high_50, "low": low_50}
@@ -57,25 +56,25 @@ def compute_factors(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    df['Return_20d'] = df['Close'].pct_change(20)
-    df['Volatility'] = df['Close'].pct_change().rolling(20).std()
-    df['SMA50'] = df['Close'].rolling(50).mean()
-    df['SMA200'] = df['Close'].rolling(200).mean()
+    df["Return_20d"] = df["Close"].pct_change(20)
+    df["Volatility"] = df["Close"].pct_change().rolling(20).std()
+    df["SMA50"] = df["Close"].rolling(50).mean()
+    df["SMA200"] = df["Close"].rolling(200).mean()
 
-    delta = df['Close'].diff()
+    delta = df["Close"].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
-    df['RSI'] = 100 - (100 / (1 + rs))
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-    df['AvgVol'] = df['Volume'].rolling(20).mean()
+    df["AvgVol"] = df["Volume"].rolling(20).mean()
 
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
+    high_low = df["High"] - df["Low"]
+    high_close = np.abs(df["High"] - df["Close"].shift())
+    low_close = np.abs(df["Low"] - df["Close"].shift())
 
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(14).mean()
+    df["ATR"] = tr.rolling(14).mean()
 
     return df.replace([np.inf, -np.inf], np.nan).dropna()
 
@@ -89,26 +88,60 @@ def generate_chart_signals(df, market=None):
         row = df.iloc[i]
 
         if market == "SIDEWAYS":
-            if row['Close'] <= row['Low'] * 1.01 and row['RSI'] < 45:
-                signals.append({"type": "BUY", "x": df.index[i], "y": row['Low']})
-            elif row['Close'] >= row['High'] * 0.99 and row['RSI'] > 55:
-                signals.append({"type": "SELL", "x": df.index[i], "y": row['High']})
+            if row["Close"] <= row["Low"] * 1.01 and row["RSI"] < 45:
+                signals.append({"type": "BUY", "x": df.index[i], "y": row["Low"]})
+            elif row["Close"] >= row["High"] * 0.99 and row["RSI"] > 55:
+                signals.append({"type": "SELL", "x": df.index[i], "y": row["High"]})
 
         else:
             if (
-                row['Close'] > row['SMA50'] and
-                row['RSI'] < 40 and
-                row['Volume'] > row['AvgVol']
+                row["Close"] > row["SMA50"]
+                and row["RSI"] < 40
+                and row["Volume"] > row["AvgVol"]
             ):
-                signals.append({"type": "BUY", "x": df.index[i], "y": row['Low']})
+                signals.append({"type": "BUY", "x": df.index[i], "y": row["Low"]})
 
             elif (
-                row['Close'] < row['SMA50'] and
-                row['RSI'] > 65
+                row["Close"] < row["SMA50"]
+                and row["RSI"] > 65
             ):
-                signals.append({"type": "SELL", "x": df.index[i], "y": row['High']})
+                signals.append({"type": "SELL", "x": df.index[i], "y": row["High"]})
 
     return signals
+
+# =========================
+# EQUITY CURVE
+# =========================
+def build_equity_curve(df, signals, initial_capital=10000):
+    df = df.copy()
+
+    equity = np.zeros(len(df), dtype=float)
+    equity[0] = float(initial_capital)
+
+    cash = float(initial_capital)
+    position = 0.0
+
+    signal_map = {s["x"]: s for s in signals}
+
+    for i in range(1, len(df)):
+        price = float(df["Close"].iloc[i])
+        date = df.index[i]
+
+        if date in signal_map:
+            sig = signal_map[date]
+
+            if sig["type"] == "BUY" and position == 0:
+                position = cash / price
+                cash = 0.0
+
+            elif sig["type"] == "SELL" and position > 0:
+                cash = position * price
+                position = 0.0
+
+        equity[i] = cash + position * price
+
+    df["Equity"] = equity
+    return df
 
 # =========================
 # ANALYZE
@@ -125,7 +158,7 @@ def analyze_stock(ticker, market, all_data):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    if df['Volume'].iloc[-1] < 1_000_000:
+    if df["Volume"].iloc[-1] < 1_000_000:
         return None
 
     df = compute_factors(df)
@@ -135,10 +168,10 @@ def analyze_stock(ticker, market, all_data):
     row = df.iloc[-1]
 
     score = (
-        row['Return_20d'] * 40 +
-        (row['Close'] / row['SMA200']) * 20 +
-        (50 - row['RSI']) * 0.5 -
-        row['Volatility'] * 100
+        row["Return_20d"] * 40 +
+        (row["Close"] / row["SMA200"]) * 20 +
+        (50 - row["RSI"]) * 0.5 -
+        row["Volatility"] * 100
     )
 
     if market == "BULL":
@@ -151,20 +184,27 @@ def analyze_stock(ticker, market, all_data):
     prob = min(
         95,
         50 +
-        (15 if row['Return_20d'] > 0 else 0) +
-        (15 if row['Close'] > row['SMA200'] else 0) +
-        (10 if row['RSI'] < 40 else 0) +
-        (10 if row['Volume'] > row['AvgVol'] else 0)
+        (15 if row["Return_20d"] > 0 else 0) +
+        (15 if row["Close"] > row["SMA200"] else 0) +
+        (10 if row["RSI"] < 40 else 0) +
+        (10 if row["Volume"] > row["AvgVol"] else 0)
     )
 
-    buy = row['Close'] - row['ATR'] * 0.5
-    sell = row['Close'] + row['ATR'] * 1.5
+    buy = row["Close"] - row["ATR"] * 0.5
+    sell = row["Close"] + row["ATR"] * 1.5
 
-    rating = "💎 STRONG BUY" if score > 80 else "🟢 BUY" if score > 60 else "🟡 HOLD" if score > 40 else "🔴 AVOID"
+    if score > 80:
+        rating = "💎 STRONG BUY"
+    elif score > 60:
+        rating = "🟢 BUY"
+    elif score > 40:
+        rating = "🟡 HOLD"
+    else:
+        rating = "🔴 AVOID"
 
     return {
         "Ticker": ticker,
-        "Price": round(row['Close'], 2),
+        "Price": round(row["Close"], 2),
         "Buy": round(buy, 2),
         "Sell": round(sell, 2),
         "Score": score,
@@ -174,30 +214,9 @@ def analyze_stock(ticker, market, all_data):
     }
 
 # =========================
-# RANKING ENGINE (HEDGE FUND STYLE)
-# =========================
-def hedge_fund_ranking(df):
-    df = df.sort_values("Score", ascending=False).copy()
-    df["Rank"] = range(1, len(df) + 1)
-
-    def style_row(row):
-        if row["Rank"] == 1:
-            return ["background-color:#00ff88;color:black;font-weight:bold;"] * len(row)
-        elif row["Rank"] <= 5:
-            return ["background-color:#66ffcc;color:black;"] * len(row)
-        else:
-            return [""] * len(row)
-
-    return df.style.apply(style_row, axis=1)
-
-# =========================
 # UI
 # =========================
-st.title("📊 Quant Screener PRO + SIDEWAYS + HEDGE FUND RANKING")
-
-if st.button("🔄 Refresh"):
-    st.cache_data.clear()
-    st.rerun()
+st.title("📊 Quant Screener PRO + TIME FILTER")
 
 market, range_data = market_condition()
 st.metric("🌎 Market Regime", market)
@@ -222,20 +241,10 @@ for stock in stocks:
         data_map[stock] = data["Data"]
 
 df = pd.DataFrame(results)
-
-# ordenar ranking
 df = df.sort_values(["Score", "Prob"], ascending=False)
 
-st.subheader("🏆 Hedge Fund Ranking Engine")
-
-placeholder = st.empty()
-with placeholder:
-    st.dataframe(hedge_fund_ranking(df), use_container_width=True)
-
-time.sleep(0.3)
-
-st.subheader("🔥 Top 5 Opportunities")
-st.dataframe(df.head(5), use_container_width=True)
+st.subheader("🏆 Ranking")
+st.dataframe(df.head(10), use_container_width=True)
 
 # =========================
 # CHART
@@ -243,14 +252,33 @@ st.dataframe(df.head(5), use_container_width=True)
 st.subheader("📈 Advanced Chart PRO MAX")
 
 if len(df) > 0:
-    selected = st.selectbox("Selecciona", df["Ticker"])
+
+    selected = st.selectbox("Selecciona ticker", df["Ticker"])
+
+    # 🔥 NUEVO: selector de años
+    years = st.selectbox("Selecciona años de la gráfica", [1, 2, 3, 5], index=3)
 
     chart_df = data_map[selected].copy()
     chart_df = chart_df.sort_index()
+    chart_df.index = pd.to_datetime(chart_df.index)
+
+    cutoff = pd.Timestamp.now() - pd.DateOffset(years=years)
+    chart_df = chart_df[chart_df.index >= cutoff]
 
     signals = generate_chart_signals(chart_df, market)
 
-    chart_df["EMA20"] = chart_df["Close"].ewm(span=20).mean()
+    def calc_return(data, periods):
+        if len(data) < periods + 1:
+            return None
+        return (data["Close"].iloc[-1] / data["Close"].iloc[-periods] - 1) * 100
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("1W", f"{calc_return(chart_df,5):.2f}%" if calc_return(chart_df,5) else "N/A")
+    col2.metric("3M", f"{calc_return(chart_df,63):.2f}%" if calc_return(chart_df,63) else "N/A")
+    col3.metric("6M", f"{calc_return(chart_df,126):.2f}%" if calc_return(chart_df,126) else "N/A")
+    col4.metric("1Y", f"{calc_return(chart_df,252):.2f}%" if calc_return(chart_df,252) else "N/A")
+
+    equity_df = build_equity_curve(chart_df, signals)
 
     fig = go.Figure()
 
@@ -276,20 +304,19 @@ if len(df) > 0:
             showlegend=False
         ))
 
-    if market == "SIDEWAYS" and range_data:
-        fig.add_hrect(
-            y0=range_data["low"],
-            y1=range_data["high"],
-            fillcolor="yellow",
-            opacity=0.15,
-            line_width=0
-        )
+    fig.add_trace(go.Scatter(
+        x=equity_df.index,
+        y=equity_df["Equity"],
+        name="Equity Curve",
+        line=dict(color="cyan", width=2),
+        yaxis="y2"
+    ))
 
     fig.add_trace(go.Bar(
         x=chart_df.index,
         y=chart_df["Volume"],
         name="Volume",
-        yaxis="y2",
+        yaxis="y3",
         opacity=0.2
     ))
 
@@ -298,7 +325,9 @@ if len(df) > 0:
         height=750,
         hovermode="x unified",
         xaxis=dict(rangeslider=dict(visible=True)),
-        yaxis2=dict(overlaying="y", side="right")
+        yaxis=dict(title="Price"),
+        yaxis2=dict(title="Equity", overlaying="y", side="right"),
+        yaxis3=dict(title="Volume", overlaying="y", side="right", position=0.95)
     )
 
     st.plotly_chart(fig, use_container_width=True)
