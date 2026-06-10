@@ -244,7 +244,7 @@ df = pd.DataFrame(results)
 df = df.sort_values(["Score", "Prob"], ascending=False)
 
 st.subheader("🏆 Ranking")
-st.dataframe(df.head(10), use_container_width=True)
+st.dataframe(df.head(55), use_container_width=True)
 
 # =========================
 # CHART
