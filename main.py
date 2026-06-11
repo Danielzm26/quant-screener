@@ -79,7 +79,19 @@ def compute_factors(df):
     return df.replace([np.inf, -np.inf], np.nan).dropna()
 
 # =========================
-# SIGNALS
+# MULTI-TIMEFRAME FILTER
+# =========================
+def higher_timeframe_filter(df):
+    df = df.copy()
+    df["SMA200"] = df["Close"].rolling(200).mean()
+
+    if len(df) < 200:
+        return True
+
+    return df["Close"].iloc[-1] > df["SMA200"].iloc[-1]
+
+# =========================
+# SIGNALS (ATR SL/TP)
 # =========================
 def generate_chart_signals(df, market=None):
     signals = []
@@ -89,9 +101,19 @@ def generate_chart_signals(df, market=None):
 
         if market == "SIDEWAYS":
             if row["Close"] <= row["Low"] * 1.01 and row["RSI"] < 45:
-                signals.append({"type": "BUY", "x": df.index[i], "y": row["Low"]})
+                signals.append({
+                    "type": "BUY",
+                    "x": df.index[i],
+                    "y": row["Low"],
+                    "sl": row["Close"] - row["ATR"],
+                    "tp": row["Close"] + row["ATR"] * 2
+                })
             elif row["Close"] >= row["High"] * 0.99 and row["RSI"] > 55:
-                signals.append({"type": "SELL", "x": df.index[i], "y": row["High"]})
+                signals.append({
+                    "type": "SELL",
+                    "x": df.index[i],
+                    "y": row["High"]
+                })
 
         else:
             if (
@@ -99,13 +121,23 @@ def generate_chart_signals(df, market=None):
                 and row["RSI"] < 40
                 and row["Volume"] > row["AvgVol"]
             ):
-                signals.append({"type": "BUY", "x": df.index[i], "y": row["Low"]})
+                signals.append({
+                    "type": "BUY",
+                    "x": df.index[i],
+                    "y": row["Low"],
+                    "sl": row["Close"] - row["ATR"],
+                    "tp": row["Close"] + row["ATR"] * 2
+                })
 
             elif (
                 row["Close"] < row["SMA50"]
                 and row["RSI"] > 65
             ):
-                signals.append({"type": "SELL", "x": df.index[i], "y": row["High"]})
+                signals.append({
+                    "type": "SELL",
+                    "x": df.index[i],
+                    "y": row["High"]
+                })
 
     return signals
 
@@ -144,6 +176,30 @@ def build_equity_curve(df, signals, initial_capital=10000):
     return df
 
 # =========================
+# PERFORMANCE METRICS
+# =========================
+def compute_performance_metrics(df):
+    returns = df["Equity"].pct_change().dropna()
+
+    if len(returns) == 0:
+        return None
+
+    sharpe = (returns.mean() / returns.std()) * np.sqrt(252)
+
+    cumulative = df["Equity"]
+    peak = cumulative.cummax()
+    drawdown = (cumulative - peak) / peak
+    max_dd = drawdown.min() * 100
+
+    win_rate = (returns > 0).sum() / len(returns) * 100
+
+    return {
+        "Sharpe": round(sharpe, 2),
+        "MaxDD": round(max_dd, 2),
+        "WinRate": round(win_rate, 2)
+    }
+
+# =========================
 # ANALYZE
 # =========================
 def analyze_stock(ticker, market, all_data):
@@ -165,13 +221,18 @@ def analyze_stock(ticker, market, all_data):
     if df.empty:
         return None
 
+    # 🔥 FILTRO MACRO
+    if not higher_timeframe_filter(df):
+        return None
+
     row = df.iloc[-1]
 
+    # 🔥 SCORE PRO
     score = (
-        row["Return_20d"] * 40 +
-        (row["Close"] / row["SMA200"]) * 20 +
-        (50 - row["RSI"]) * 0.5 -
-        row["Volatility"] * 100
+        row["Return_20d"] * 50 +
+        (row["Close"] / row["SMA200"]) * 30 -
+        row["Volatility"] * 120 +
+        (row["RSI"] < 40) * 10
     )
 
     if market == "BULL":
@@ -193,14 +254,7 @@ def analyze_stock(ticker, market, all_data):
     buy = row["Close"] - row["ATR"] * 0.5
     sell = row["Close"] + row["ATR"] * 1.5
 
-    if score > 80:
-        rating = "💎 STRONG BUY"
-    elif score > 60:
-        rating = "🟢 BUY"
-    elif score > 40:
-        rating = "🟡 HOLD"
-    else:
-        rating = "🔴 AVOID"
+    rating = "💎 STRONG BUY" if score > 80 else "🟢 BUY" if score > 60 else "🟡 HOLD" if score > 40 else "🔴 AVOID"
 
     return {
         "Ticker": ticker,
@@ -216,9 +270,9 @@ def analyze_stock(ticker, market, all_data):
 # =========================
 # UI
 # =========================
-st.title("📊 Quant Screener PRO + TIME FILTER")
+st.title("📊 Quant Screener PRO MAX (HEDGE FUND)")
 
-market, range_data = market_condition()
+market, _ = market_condition()
 st.metric("🌎 Market Regime", market)
 
 all_data = download_all(stocks)
@@ -229,22 +283,13 @@ data_map = {}
 for stock in stocks:
     data = analyze_stock(stock, market, all_data)
     if data:
-        results.append({
-            "Ticker": data["Ticker"],
-            "Price": data["Price"],
-            "Buy": data["Buy"],
-            "Sell": data["Sell"],
-            "Score": data["Score"],
-            "Prob": data["Prob"],
-            "Rating": data["Rating"]
-        })
+        results.append({k: data[k] for k in ["Ticker","Price","Buy","Sell","Score","Prob","Rating"]})
         data_map[stock] = data["Data"]
 
-df = pd.DataFrame(results)
-df = df.sort_values(["Score", "Prob"], ascending=False)
+df = pd.DataFrame(results).sort_values(["Score","Prob"], ascending=False)
 
 st.subheader("🏆 Ranking")
-st.dataframe(df.head(55), use_container_width=True)
+st.dataframe(df.head(35), use_container_width=True)
 
 # =========================
 # CHART
@@ -254,31 +299,24 @@ st.subheader("📈 Advanced Chart PRO MAX")
 if len(df) > 0:
 
     selected = st.selectbox("Selecciona ticker", df["Ticker"])
-
-    # 🔥 NUEVO: selector de años
-    years = st.selectbox("Selecciona años de la gráfica", [1, 2, 3, 5], index=3)
+    years = st.selectbox("Selecciona años", [1,2,3,5], index=3)
 
     chart_df = data_map[selected].copy()
-    chart_df = chart_df.sort_index()
     chart_df.index = pd.to_datetime(chart_df.index)
 
     cutoff = pd.Timestamp.now() - pd.DateOffset(years=years)
     chart_df = chart_df[chart_df.index >= cutoff]
 
     signals = generate_chart_signals(chart_df, market)
-
-    def calc_return(data, periods):
-        if len(data) < periods + 1:
-            return None
-        return (data["Close"].iloc[-1] / data["Close"].iloc[-periods] - 1) * 100
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("1W", f"{calc_return(chart_df,5):.2f}%" if calc_return(chart_df,5) else "N/A")
-    col2.metric("3M", f"{calc_return(chart_df,63):.2f}%" if calc_return(chart_df,63) else "N/A")
-    col3.metric("6M", f"{calc_return(chart_df,126):.2f}%" if calc_return(chart_df,126) else "N/A")
-    col4.metric("1Y", f"{calc_return(chart_df,252):.2f}%" if calc_return(chart_df,252) else "N/A")
-
     equity_df = build_equity_curve(chart_df, signals)
+
+    # 🔥 METRICS
+    metrics = compute_performance_metrics(equity_df)
+    if metrics:
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Sharpe", metrics["Sharpe"])
+        c2.metric("MaxDD", f"{metrics['MaxDD']}%")
+        c3.metric("WinRate", f"{metrics['WinRate']}%")
 
     fig = go.Figure()
 
@@ -287,8 +325,7 @@ if len(df) > 0:
         open=chart_df["Open"],
         high=chart_df["High"],
         low=chart_df["Low"],
-        close=chart_df["Close"],
-        name="Price"
+        close=chart_df["Close"]
     ))
 
     fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["SMA50"], name="SMA50"))
@@ -300,34 +337,25 @@ if len(df) > 0:
             y=[s["y"]],
             mode="markers+text",
             text=[s["type"]],
-            marker=dict(size=10, color="green" if s["type"] == "BUY" else "red"),
+            marker=dict(size=10, color="green" if s["type"]=="BUY" else "red"),
             showlegend=False
         ))
+
+        if "sl" in s:
+            fig.add_hline(y=s["sl"], line_dash="dot", line_color="red")
+            fig.add_hline(y=s["tp"], line_dash="dot", line_color="green")
 
     fig.add_trace(go.Scatter(
         x=equity_df.index,
         y=equity_df["Equity"],
-        name="Equity Curve",
-        line=dict(color="cyan", width=2),
+        name="Equity",
         yaxis="y2"
-    ))
-
-    fig.add_trace(go.Bar(
-        x=chart_df.index,
-        y=chart_df["Volume"],
-        name="Volume",
-        yaxis="y3",
-        opacity=0.2
     ))
 
     fig.update_layout(
         template="plotly_dark",
         height=750,
-        hovermode="x unified",
-        xaxis=dict(rangeslider=dict(visible=True)),
-        yaxis=dict(title="Price"),
-        yaxis2=dict(title="Equity", overlaying="y", side="right"),
-        yaxis3=dict(title="Volume", overlaying="y", side="right", position=0.95)
+        yaxis2=dict(overlaying="y", side="right")
     )
 
     st.plotly_chart(fig, use_container_width=True)
